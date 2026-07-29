@@ -380,6 +380,21 @@ main.solo .queue{border-right:0}
 .cards .c{font-family:var(--display);font-size:clamp(16px,1.7vw,21px);letter-spacing:.08em;white-space:nowrap}
 .cards .st{font-size:13px;color:var(--ink-2);padding-left:14px;white-space:nowrap}
 .cards .v{font-family:var(--display);font-size:clamp(17px,1.8vw,23px);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;width:6em}
+/* The card as it is printed: bottle green, script logo, and the QR on a white
+   tile. Never inverted, or Apple's scanner will not read it. */
+.giftcard{
+  background:var(--ink);color:var(--page);padding:20px;margin-top:14px;
+  display:flex;gap:20px;align-items:center;max-width:520px
+}
+.giftcard .qr{background:var(--page);padding:8px;flex:none;line-height:0}
+.giftcard .qr svg{display:block}
+.giftcard .side{min-width:0}
+.giftcard img{width:40px;height:40px;display:block;margin-bottom:10px}
+.giftcard .code{font-family:var(--display);font-size:clamp(19px,2.2vw,27px);letter-spacing:.1em;line-height:1;display:block}
+.giftcard .bal{font-family:var(--display);font-size:clamp(28px,3.4vw,42px);line-height:1;margin-top:8px;display:block}
+.giftcard .terms{font-size:11px;opacity:.7;margin-top:10px;line-height:1.45;display:block;word-break:break-all}
+@media (max-width:560px){ .giftcard{flex-direction:column;align-items:flex-start;gap:14px} }
+
 .wallets{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 10px}
 .wallets button{
   border:var(--hair);padding:15px 18px;font-family:var(--display);
@@ -1604,6 +1619,194 @@ function drawNoBook(){
 }
 
 
+/* ---- the QR on the back of a card ---------------------------------------
+
+   Byte mode, error correction M, versions 1 to 3. That is a single error
+   correction block, which is what keeps this short. A card link is about 40
+   characters and version 3 holds 42.
+
+   Verified, not eyeballed: every payload reproduces a known-good encoder exactly
+   at some mask, and thirty rendered codes decoded back to their payload. Dark
+   green on white and never inverted, because Apple's scanner will not read a
+   light-on-dark code.                                                          */
+
+const QR_SPEC = { 1:[21,16,10,null], 2:[25,28,16,18], 3:[29,44,26,22] };
+const QR_EXP = new Uint8Array(512), QR_LOG = new Uint8Array(256);
+(function(){
+  let x = 1;
+  for(let i=0;i<255;i++){ QR_EXP[i]=x; QR_LOG[x]=i; x<<=1; if(x & 0x100) x ^= 0x11d; }
+  for(let i=255;i<512;i++) QR_EXP[i]=QR_EXP[i-255];
+})();
+const qrMul = (a,b) => (a===0||b===0) ? 0 : QR_EXP[QR_LOG[a]+QR_LOG[b]];
+
+function qrGenerator(n){
+  let poly = [1];
+  for(let i=0;i<n;i++){
+    const next = new Array(poly.length+1).fill(0);
+    for(let j=0;j<poly.length;j++){
+      next[j]   ^= poly[j];
+      next[j+1] ^= qrMul(poly[j], QR_EXP[i]);
+    }
+    poly = next;
+  }
+  return poly;
+}
+function qrRemainder(data, ecLen){
+  const gen = qrGenerator(ecLen), rem = new Array(ecLen).fill(0);
+  for(const byte of data){
+    const factor = byte ^ rem[0];
+    rem.shift(); rem.push(0);
+    for(let i=0;i<ecLen;i++) rem[i] ^= qrMul(gen[i+1], factor);
+  }
+  return rem;
+}
+const QR_MASKS = [
+  (r,c)=>(r+c)%2===0, (r,c)=>r%2===0, (r,c)=>c%3===0, (r,c)=>(r+c)%3===0,
+  (r,c)=>(Math.floor(r/2)+Math.floor(c/3))%2===0, (r,c)=>((r*c)%2+(r*c)%3)===0,
+  (r,c)=>(((r*c)%2+(r*c)%3)%2)===0, (r,c)=>(((r+c)%2+(r*c)%3)%2)===0
+];
+function qrReserved(version){
+  const size = QR_SPEC[version][0];
+  const r = Array.from({length:size}, ()=> new Array(size).fill(false));
+  const box = (r0,c0,h,w) => { for(let i=0;i<h;i++) for(let j=0;j<w;j++){
+    const rr=r0+i, cc=c0+j; if(rr>=0&&cc>=0&&rr<size&&cc<size) r[rr][cc]=true; } };
+  box(0,0,9,9); box(0,size-8,9,8); box(size-8,0,8,9);
+  for(let i=0;i<size;i++){ r[6][i]=true; r[i][6]=true; }
+  const at = QR_SPEC[version][3];
+  if(at!==null) box(at-2,at-2,5,5);
+  return r;
+}
+function qrPenalty(m){
+  const size = m.length; let score = 0;
+  const runs = get => {
+    for(let a=0;a<size;a++){
+      let last=-1, len=0;
+      for(let b=0;b<size;b++){
+        const v = get(a,b);
+        if(v===last) len++; else { if(len>=5) score += 3+(len-5); last=v; len=1; }
+      }
+      if(len>=5) score += 3+(len-5);
+    }
+  };
+  runs((a,b)=>m[a][b]); runs((a,b)=>m[b][a]);
+  for(let r=0;r<size-1;r++) for(let c=0;c<size-1;c++){
+    const v=m[r][c];
+    if(v===m[r][c+1] && v===m[r+1][c] && v===m[r+1][c+1]) score += 3;
+  }
+  const findPat = arr => {
+    let n=0;
+    for(let i=0;i+11<=arr.length;i++){
+      const seg = arr.slice(i,i+11).join("");
+      if(seg==="10111010000" || seg==="00001011101") n++;
+    }
+    return n;
+  };
+  for(let a=0;a<size;a++){
+    score += 40*findPat(m[a]);
+    score += 40*findPat(m.map(row=>row[a]));
+  }
+  let dark=0;
+  for(let r=0;r<size;r++) for(let c=0;c<size;c++) dark += m[r][c];
+  score += 10*Math.floor(Math.abs(dark*100/(size*size) - 50)/5);
+  return score;
+}
+function qrMatrix(text){
+  const bytes = Array.from(new TextEncoder().encode(text));
+  let version = null;
+  for(const v of [1,2,3]) if(bytes.length <= QR_SPEC[v][1]-2){ version = v; break; }
+  if(version===null) throw new Error("QR payload too long: "+bytes.length+" bytes");
+
+  const dataCw = QR_SPEC[version][1], bits = [];
+  const push = (v,n) => { for(let i=n-1;i>=0;i--) bits.push((v>>i)&1); };
+  push(0b0100,4); push(bytes.length,8);
+  for(const b of bytes) push(b,8);
+  push(0, Math.min(4, dataCw*8 - bits.length));
+  while(bits.length % 8) bits.push(0);
+  const data = [];
+  for(let i=0;i<bits.length;i+=8){
+    let byte=0; for(let j=0;j<8;j++) byte=(byte<<1)|bits[i+j];
+    data.push(byte);
+  }
+  const PAD = [0xEC,0x11];
+  for(let i=0; data.length<dataCw; i++) data.push(PAD[i%2]);
+
+  const codewords = data.concat(qrRemainder(data, QR_SPEC[version][2]));
+  const reserved = qrReserved(version);
+  const size = QR_SPEC[version][0];
+  let best = null;
+
+  for(let maskId=0; maskId<8; maskId++){
+    const m = Array.from({length:size}, ()=> new Array(size).fill(0));
+    const finder = (r,c) => {
+      for(let i=-1;i<=7;i++) for(let j=-1;j<=7;j++){
+        const rr=r+i, cc=c+j;
+        if(rr<0||cc<0||rr>=size||cc>=size) continue;
+        const edge = (i>=0&&i<=6&&(j===0||j===6)) || (j>=0&&j<=6&&(i===0||i===6));
+        m[rr][cc] = (edge || (i>=2&&i<=4&&j>=2&&j<=4)) ? 1 : 0;
+      }
+    };
+    finder(0,0); finder(0,size-7); finder(size-7,0);
+    for(let i=8;i<size-8;i++){ const b = i%2===0 ? 1 : 0; m[6][i]=b; m[i][6]=b; }
+    const at = QR_SPEC[version][3];
+    if(at!==null) for(let i=-2;i<=2;i++) for(let j=-2;j<=2;j++)
+      m[at+i][at+j] = (Math.max(Math.abs(i),Math.abs(j))===1) ? 0 : 1;
+
+    const dataBits = [];
+    for(const b of codewords) for(let i=7;i>=0;i--) dataBits.push((b>>i)&1);
+    let idx = 0, up = true;
+    for(let col=size-1; col>0; col-=2){
+      if(col===6) col--;
+      for(let k=0;k<size;k++){
+        const row = up ? size-1-k : k;
+        for(const c of [col, col-1]){
+          if(reserved[row][c]) continue;
+          m[row][c] = idx < dataBits.length ? dataBits[idx++] : 0;
+        }
+      }
+      up = !up;
+    }
+    for(let r=0;r<size;r++) for(let c=0;c<size;c++)
+      if(!reserved[r][c] && QR_MASKS[maskId](r,c)) m[r][c] ^= 1;
+
+    let fdata = maskId, rem = maskId;               // error correction M is 0b00
+    for(let i=0;i<10;i++) rem = ((rem<<1) ^ ((rem>>9)*0x537));
+    const f = (((fdata<<10) | (rem & 0x3FF)) ^ 0x5412) & 0x7FFF;
+    const bit = i => (f>>(14-i))&1;
+    for(let i=0;i<=5;i++) m[8][i] = bit(i);
+    m[8][7] = bit(6); m[8][8] = bit(7); m[7][8] = bit(8);
+    for(let i=9;i<=14;i++) m[14-i][8] = bit(i);
+    for(let i=0;i<=6;i++)  m[size-1-i][8] = bit(i);
+    for(let i=7;i<=14;i++) m[8][size-15+i] = bit(i);
+    m[size-8][8] = 1;
+
+    const p = qrPenalty(m);
+    if(!best || p < best.p) best = {p, m};
+  }
+  return best.m;
+}
+function qrSvg(text, px){
+  let m;
+  try{ m = qrMatrix(text); }
+  catch(e){ return '<span style="font-size:11px;color:#a8271c">'+esc(e.message)+'</span>'; }
+  const n = m.length, quiet = 3, total = n + quiet*2;
+  let d = "";
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++)
+    if(m[r][c]) d += "M"+(c+quiet)+" "+(r+quiet)+"h1v1h-1z";
+  return '<svg viewBox="0 0 '+total+' '+total+'" width="'+px+'" height="'+px+
+         '" shape-rendering="crispEdges" role="img" aria-label="Scan this card">'+
+         '<rect width="'+total+'" height="'+total+'" fill="#ffffff"/>'+
+         '<path d="'+d+'" fill="#143f14"/></svg>';
+}
+
+// Where the QR points. Always the live address, never wherever this file happens
+// to be sitting: a card printed today is in somebody's wallet for a year, so a
+// preview URL on the back of it would be worthless. Short on purpose too, because
+// fewer characters means fewer modules and an easier scan off a small card.
+//   https://graceyspizza.com/g/4K2P8HQV   is 35 bytes; version 3 holds 42.
+const GIFT_HOST = "https://graceyspizza.com/g/";
+const giftLink = code => GIFT_HOST + String(code).replace(/[^A-Z0-9]/gi,"").replace(/^GRC/i,"");
+
+
 /* ---- the gift cards screen ---------------------------------------------- */
 
 let GIFT_OPEN = null;    // the code on screen, or null for the book
@@ -1672,9 +1875,18 @@ function giftCardPanel(code){
     ${giftHistory(c)}
     <div class="block">
       <span class="label">THE CUSTOMER'S SIDE</span>
-      <p class="hint" style="margin-top:12px">The QR on the card opens this same code as a
-      page: the balance, what it has done, and the wallet buttons. Their screen and this
-      one read the same book, so they never disagree.</p>
+      <div class="giftcard">
+        <span class="qr">${qrSvg(giftLink(code), 148)}</span>
+        <span class="side">
+          <img src="${document.querySelector("header img").src}" alt="">
+          <span class="code">${esc(code)}</span>
+          <span class="bal">${money(c.pence)}</span>
+          <span class="terms">Spends at Gracey's Pizza, St&nbsp;Albans.<br>${esc(giftLink(code))}</span>
+        </span>
+      </div>
+      <p class="hint" style="margin-top:14px">That is the back of the card. Scanning it opens
+      the same code as a page: the balance, what it has done, and the wallet buttons. Their
+      screen and this one read the same book, so they never disagree.</p>
       <p style="margin-top:12px"><a class="jump" style="display:inline-block;text-decoration:none;color:inherit"
         href="?gift=${encodeURIComponent(code)}">SEE THEIR SIDE</a></p>
     </div>
