@@ -1,0 +1,5 @@
+# Pitch research, offer docs and handoffs stay local. The repo is public so the
+# Pages demo can exist; only the product ships.
+docs/
+brand/
+.DS_Store
